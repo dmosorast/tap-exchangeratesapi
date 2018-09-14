@@ -3,6 +3,7 @@
 import json
 import sys
 import argparse
+import re
 import time
 import requests
 import singer
@@ -10,7 +11,8 @@ import backoff
 
 from datetime import date, datetime, timedelta
 
-base_url = 'https://api.fixer.io/'
+base_url = 'https://data.fixer.io/api/'
+https_supported = True
 
 logger = singer.get_logger()
 session = requests.Session()
@@ -42,11 +44,17 @@ def giveup(error):
                       giveup=giveup,
                       interval=30)
 def request(url, params):
-    response = requests.get(url=url, params=params)
+    global https_supported
+    if https_supported:
+        response = requests.get(url=url, params=params)
+    if not https_supported or response.json().get('error', {}).get('type') == 'https_access_restricted':
+        logger.warn("HTTPS is not supported for this Fixer.io account, falling back to HTTP.")
+        response = requests.get(url=re.sub('^https://', 'http://', url), params=params)
+        https_supported = False
     response.raise_for_status()
     return response
     
-def do_sync(base, start_date):
+def do_sync(base, start_date, access_key):
     logger.info('Replicating exchange rate data from fixer.io starting from {}'.format(start_date))
     singer.write_schema('exchange_rate', schema, 'date')
 
@@ -55,8 +63,10 @@ def do_sync(base, start_date):
     
     try:
         while True:
-            response = request(base_url + next_date, {'base': base})
+            response = request(base_url + next_date, {'base': base, 'access_key': access_key})
             payload = response.json()
+            if payload and payload.get('success') is not True:
+                raise Exception(payload.get('error', 'An unknown error occurred.'))
 
             if datetime.strptime(next_date, DATE_FORMAT) > datetime.utcnow():
                 break
@@ -101,7 +111,7 @@ def main():
     start_date = state.get('start_date',
                            config.get('start_date', datetime.utcnow().strftime(DATE_FORMAT)))
 
-    do_sync(config.get('base', 'USD'), start_date)
+    do_sync(config.get('base', 'USD'), start_date, config.get('access_key'))
 
 
 if __name__ == '__main__':
